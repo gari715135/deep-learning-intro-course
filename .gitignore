@@ -246,3 +246,4 @@ fabric.properties
 *.pkl
 */data/
 *.csv
+/**/data/
