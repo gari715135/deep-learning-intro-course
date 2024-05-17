@@ -241,3 +241,8 @@ fabric.properties
 
 *.DS_Store
 /7 Working with Keras - A deep dive/model.png
+
+*.data
+*.pkl
+*/data/
+*.csv
