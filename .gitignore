@@ -247,3 +247,5 @@ fabric.properties
 */data/
 *.csv
 /**/data/
+
+*.keras
