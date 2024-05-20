@@ -251,3 +251,4 @@ fabric.properties
 *.keras
 *data.zip
 *jena_climate_2009_2016.csv.zip
+*.gzip
