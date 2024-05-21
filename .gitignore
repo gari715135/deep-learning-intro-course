@@ -252,3 +252,6 @@ fabric.properties
 *data.zip
 *jena_climate_2009_2016.csv.zip
 *.gzip
+*.parquet
+*.tgz
+logs/
