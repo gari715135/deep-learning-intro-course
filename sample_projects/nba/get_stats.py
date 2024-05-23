@@ -175,3 +175,4 @@ start = time.perf_counter_ns() # Track cell's runtime
 scheduleFrame = getSeasonScheduleFrame(seasons,seasonType)
 end = time.perf_counter_ns()
 
+scheduleFrame.to_parquet('./home_team_w_;')

@@ -255,3 +255,4 @@ fabric.properties
 *.parquet
 *.tgz
 logs/
+*sqlite*
