@@ -1,193 +1,152 @@
 # %%
-import nba_api.stats
-import nba_api.stats.static
-import nba_api.stats.static.teams
+import os
 import pandas as pd
-import numpy as np
-import sqlite3
-import nba_api
+import nba_api.stats.endpoints
+from nba_api.stats.static import teams
+from nba_api.stats.endpoints import leaguegamefinder
+import time
+from nba_api.stats.library.parameters import *
 
-pd.set_option('display.max_columns', 500)
-# Connect to the SQLite database
-conn = sqlite3.connect('nba.sqlite')
+def calculate_plus_minus(df):
+    # Create a boolean column for home games
+    df['HOME_GAME'] = ~df['MATCHUP'].str.contains('@')
 
-# Query the game table and load the data into a DataFrame
-query = """
-SELECT *
-FROM game
-"""
-games = pd.read_sql_query(query, conn)
+    # Calculate the total points for each game and whether it's a home game
+    game_points = df.groupby('GAME_ID')['PTS'].transform('sum')
 
-# Close the database connection
-conn.close()
-games
+    # Calculate the plus-minus
+    df['PLUS_MINUS'] = df['PTS'] - (game_points - df['PTS'])
 
-# %%
-team_id_age_arr = np.array([[str(t.get('id')), t.get('year_founded')] for t in nba_api.stats.static.teams.get_teams()])
+    #df.loc[df['HOME_GAME'], 'PLUS_MINUS'] *= -1
 
-# Prepare the data
-df = games.copy()
-msk = (df['team_id_home'].isin(team_id_age_arr[:, 0])) | (df['team_id_away'].isin(team_id_age_arr[:, 0]))
+    return df
 
-df = df.drop_duplicates(subset=['game_id'])
-df['game_date'] = pd.to_datetime(df['game_date'])
-df = df.loc[df['season_type'].isin(["Playoffs", "Regular Season"])]
-df = df.loc[df['game_date']>="1990-08-01"]
-# Sorting to ensure correct rolling calculation
-df = df.sort_values(by='game_date')
 
-# Calculate days since last game for home and away teams
-df['days_since_last_game_home'] = df.groupby('team_id_home')['game_date'].diff().dt.days
-df['days_since_last_game_away'] = df.groupby('team_id_away')['game_date'].diff().dt.days
+nba_teams = teams.get_teams()
+fp_team = "./data/all_games.parquet.gzip"
 
-# Calculate team age at time of game
-team_age_df = pd.DataFrame(team_id_age_arr, columns=['team_id', 'year_founded'])
-team_age_df['year_founded'] = team_age_df['year_founded'].astype(int)
+if not os.path.exists(fp_team):
+    print("data not found")
+    all_games = pd.DataFrame()
 
-df = df.merge(team_age_df, left_on='team_id_home', right_on='team_id', how='left')
-df['team_age_at_game_home'] = df['game_date'].dt.year - df['year_founded']
-df = df.drop(columns=['team_id', 'year_founded'])
+    for team in nba_teams:
+        team_id = team.get('id')
+        gamefinder = leaguegamefinder.LeagueGameFinder(team_id_nullable=team_id,league_id_nullable=LeagueIDNullable().nba, season_type_nullable=SeasonType().regular)
 
-df = df.merge(team_age_df, left_on='team_id_away', right_on='team_id', how='left')
-df['team_age_at_game_away'] = df['game_date'].dt.year - df['year_founded']
-df = df.drop(columns=['team_id', 'year_founded'])
+        team_games = gamefinder.get_data_frames()[0]
+        all_games = pd.concat([all_games, team_games])
+    all_games.to_parquet(fp_team, index=False)
+else:
+    print("data found local")
+    all_games = pd.read_parquet(fp_team)
 
-# Rolling statistics for home team
-rolling_features = ['fgm_home', 'fga_home', 'fg_pct_home', 'fg3m_home', 'fg3a_home', 'fg3_pct_home', 'ftm_home', 'fta_home', 'ft_pct_home', 'oreb_home', 'dreb_home', 'reb_home', 'ast_home', 'stl_home', 'blk_home', 'tov_home', 'pf_home', 'pts_home']
-for feature in rolling_features:
-    df[f'rolling_avg_3_{feature}'] = df.groupby('team_id_home')[feature].transform(lambda x: x.rolling(window=3, min_periods=1).mean())
+all_games['GAME_DATE'] = pd.to_datetime(all_games['GAME_DATE'])
+all_games = all_games.sort_values(['GAME_DATE', 'GAME_ID']).reset_index(drop=True)
 
-# Rolling statistics for away team
-for feature in rolling_features:
-    modified_feature = feature.replace('home', 'away')
-    df[f'rolling_avg_3_{modified_feature}'] = df.groupby('team_id_away')[modified_feature].transform(lambda x: x.rolling(window=3, min_periods=1).mean())
-
-# Calculate the differences between rolling averages of home and away teams for comparative analysis
-for feature in rolling_features:
-    home_feature = f'rolling_avg_3_{feature}'
-    away_feature = home_feature.replace('home', 'away')
-    df[f'diff_{feature}'] = df[home_feature] - df[away_feature]
-
-# Define the outcome variables
-df['home_win'] = (df['wl_home'] == 'W').astype(int)  # 1 if home team won, 0 otherwise
-df['point_diff'] = df['pts_home'] - df['pts_away']  # Point difference of the game
-
-# Select only the necessary columns for training
-model_features = [col for col in df.columns if 'rolling_avg_3' in col or col in ['home_win', 'point_diff', 'game_date', 'season_id', 'days_since_last_game_home', 'days_since_last_game_away', 'team_age_at_game_home', 'team_age_at_game_away']]
-final_df = df[model_features]
-
-home_features = [c for c in final_df.columns if "home" in c and not c=="home_win"]
-away_features = [c for c in final_df.columns if "away" in c and not c=="home_win"]
-final_df
+# Apply the function to calculate plus-minus
+all_games = calculate_plus_minus(all_games)
+all_games['DAYS_SINCE_LAST_GAME'] = all_games.groupby(['SEASON_ID','TEAM_ID'])['GAME_DATE'].diff().dt.days
 
 # %%
-import tensorflow as tf
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Dense, Concatenate, Normalization
-from tensorflow.keras.utils import plot_model
-
-tf.keras.backend.clear_session()
-
-train_df = final_df.copy()
-
-# Assuming df is your DataFrame loaded from the SQLite database
-# Fill NaN values with the mean of each column (or choose another method)
-train_df[home_features] = train_df[home_features].apply(lambda x: x.fillna(x.mean()), axis=0)
-train_df[away_features] = train_df[away_features].apply(lambda x: x.fillna(x.mean()), axis=0)
-
-# Normalize the input features
-normalizer_home = Normalization(axis=-1)
-normalizer_home.adapt(train_df[home_features].to_numpy())
-
-normalizer_away = Normalization(axis=-1)
-normalizer_away.adapt(train_df[away_features].to_numpy())
-
-# Define model inputs
-home_input = Input(shape=(len(home_features),), name="home_input")
-away_input = Input(shape=(len(away_features),), name="away_input")
-
-# Apply normalization
-norm_home = normalizer_home(home_input)
-norm_away = normalizer_away(away_input)
-
-# Concatenate the inputs
-concatenated = Concatenate()([norm_home, norm_away])
-
-# Define the rest of the model
-dense1 = Dense(128, activation='relu')(concatenated)
-dense2 = Dense(64, activation='relu')(dense1)
-dense3 = Dense(32, activation='relu')(dense2)
-dense4 = Dense(16, activation='relu')(dense3)
-
-# Output layer for binary classification (Home win or not)
-output_home_win = Dense(1, activation='sigmoid', name="home_win")(dense4)
-
-# Output layer for regression (Point difference)
-output_point_diff = Dense(1, name="point_diff")(dense4)
-
-# Create the model
-model = Model(inputs=[home_input, away_input], outputs=[output_home_win, output_point_diff])
-
-# Compile the model
-model.compile(optimizer='adam',
-              loss={'home_win': 'binary_crossentropy', 'point_diff': 'mean_squared_error'},
-              metrics={'home_win': 'accuracy', 'point_diff': 'mse'})
-
-# Visualize the model structure
-plot_model(model, show_shapes=True, show_layer_names=True, dpi=75)
+# Franchise founding dates (replace with actual data)
+franchise_founding_dates = {
+    1610612742: 1980,  # Dallas Mavericks
+    1610612760: 1967,  # Oklahoma City Thunder
+    1610612759: 1976,  # San Antonio Spurs
+    1610612765: 1948,  # Detroit Pistons
+    1610612744: 1946,  # Golden State Warriors
+    1610612762: 1974,  # Utah Jazz
+    1610612745: 1967,  # Houston Rockets
+    1610612746: 1970,  # LA Clippers
+    1610612757: 1970,  # Portland Trail Blazers
+    1610612758: 1948   # Sacramento Kings
+}
 
 # %%
-import numpy as np
-from sklearn.model_selection import train_test_split
-import matplotlib.pyplot as plt
+# 1. Head-to-head records
+def calculate_head_to_head(df):
+    head_to_head = {}
+    for _, row in df.iterrows():
+        home_team = row['TEAM_ID']
+        away_team = row['TEAM_ID']
+        matchup = tuple(sorted([home_team, away_team]))
+        
+        if matchup not in head_to_head:
+            head_to_head[matchup] = {'wins_home': 0, 'wins_away': 0}
+        
+        if row['WL'] == 'W' and not row['HOME_GAME']:
+            head_to_head[matchup]['wins_away'] += 1
+        elif row['WL'] == 'W' and row['HOME_GAME']:
+            head_to_head[matchup]['wins_home'] += 1
+    
+    df['HEAD_TO_HEAD_HOME_WINS'] = df.apply(lambda row: head_to_head[tuple(sorted([row['TEAM_ID'], row['TEAM_ID']]))]['wins_home'], axis=1)
+    df['HEAD_TO_HEAD_AWAY_WINS'] = df.apply(lambda row: head_to_head[tuple(sorted([row['TEAM_ID'], row['TEAM_ID']]))]['wins_away'], axis=1)
 
-# Prepare data for training
-X_home = train_df[home_features].to_numpy()
-X_away = train_df[away_features].to_numpy()
-y_home_win = train_df['home_win'].to_numpy()
-y_point_diff = train_df['point_diff'].to_numpy()
-
-# Split the data into training and testing sets (80/20 split)
-X_home_train, X_home_test, X_away_train, X_away_test, y_home_win_train, y_home_win_test, y_point_diff_train, y_point_diff_test = train_test_split(
-    X_home, X_away, y_home_win, y_point_diff, test_size=0.2, random_state=42)
-
-# Train the model
-history = model.fit(
-    [X_home_train, X_away_train], {'home_win': y_home_win_train, 'point_diff': y_point_diff_train},
-    validation_split=0.2,
-    epochs=20,
-    batch_size=32,
-    verbose=1
-)
-
-# Evaluate the model on the test set
-test_results = model.evaluate([X_home_test, X_away_test], {'home_win': y_home_win_test, 'point_diff': y_point_diff_test}, verbose=1)
-
-# Plot training history
-def plot_history(history):
-    plt.figure(figsize=(12, 6))
-
-    plt.subplot(1, 2, 1)
-    plt.plot(history.history['home_win_accuracy'], label='Home Win Accuracy')
-    plt.plot(history.history['val_home_win_accuracy'], label='Val Home Win Accuracy')
-    plt.title('Home Win Accuracy')
-    plt.xlabel('Epochs')
-    plt.ylabel('Accuracy')
-    plt.legend()
-
-    plt.subplot(1, 2, 2)
-    plt.plot(history.history['point_diff_mse'], label='Point Difference rmse')
-    plt.plot(history.history['val_point_diff_mse'], label='Val Point Difference rmse')
-    plt.title('Point Difference Mean Squared Error')
-    plt.xlabel('Epochs')
-    plt.ylabel('rmse')
-    plt.legend()
-
-    plt.show()
-
-plot_history(history)
+    return df
 
 # %%
+# 2. Recent performance metrics
+def calculate_recent_performance(df, windows=[3, 10]):
+    for window in windows:
+        df[f'AVG_{window}_GAME_PERFORMANCE'] = df.groupby('TEAM_ID')['PLUS_MINUS'].rolling(window=window, min_periods=1).mean().reset_index(0, drop=True)
+        df[f'WIN_PCT_{window}_GAMES'] = df.groupby('TEAM_ID')['WL'].apply(lambda x: (x == 'W').rolling(window=window, min_periods=1).mean()).reset_index(0, drop=True)
+    
+    return df
 
+# %%
+# 3. Home/away splits
+def calculate_home_away_splits(df):
+    home_splits = df[df['HOME_GAME']].groupby('TEAM_ID')[['PLUS_MINUS', 'WL']].agg({'PLUS_MINUS': 'mean', 'WL': lambda x: (x == 'W').mean()}).reset_index()
+    home_splits = home_splits.rename(columns={'PLUS_MINUS': 'HOME_PLUS_MINUS', 'WL': 'HOME_WIN_PCT'})
+    
+    away_splits = df[~df['HOME_GAME']].groupby('TEAM_ID')[['PLUS_MINUS', 'WL']].agg({'PLUS_MINUS': 'mean', 'WL': lambda x: (x == 'W').mean()}).reset_index()
+    away_splits = away_splits.rename(columns={'PLUS_MINUS': 'AWAY_PLUS_MINUS', 'WL': 'AWAY_WIN_PCT'})
+    
+    df = pd.merge(df, home_splits, on='TEAM_ID', how='left')
+    df = pd.merge(df, away_splits, on='TEAM_ID', how='left')
+    
+    return df
 
+# %%
+# 4. Rest days since last game
+def calculate_rest_days(df):
+    df['REST_DAYS'] = df.groupby('TEAM_ID')['GAME_DATE'].diff().dt.days
+    df['REST_DAYS'].fillna(0, inplace=True)
+    return df
 
+# %%
+# 5. Franchise age
+def calculate_franchise_age(df, franchise_founding_dates):
+    df['FRANCHISE_AGE'] = df['GAME_DATE'].dt.year - df['TEAM_ID'].map(franchise_founding_dates)
+    return df
+
+# %%
+# 6. Cumulative season performance
+def calculate_cumulative_season_performance(df):
+    df['CUMULATIVE_SEASON_PLUS_MINUS'] = df.groupby(['SEASON_ID', 'TEAM_ID'])['PLUS_MINUS'].cumsum()
+    df['CUMULATIVE_SEASON_WINS'] = df.groupby(['SEASON_ID', 'TEAM_ID'])['WL'].apply(lambda x: (x == 'W').cumsum())
+    df['CUMULATIVE_SEASON_LOSSES'] = df.groupby(['SEASON_ID', 'TEAM_ID'])['WL'].apply(lambda x: (x == 'L').cumsum())
+    return df
+
+# %%
+# 7. Previous season performance
+def calculate_previous_season_performance(df):
+    previous_season_performance = df.groupby(['SEASON_ID', 'TEAM_ID'])[['PLUS_MINUS', 'WL']].sum().reset_index()
+    previous_season_performance['SEASON_ID'] = previous_season_performance['SEASON_ID'] + 1
+    previous_season_performance = previous_season_performance.rename(columns={'PLUS_MINUS': 'PREVIOUS_SEASON_PLUS_MINUS', 'WL': 'PREVIOUS_SEASON_WINS'})
+    df = pd.merge(df, previous_season_performance, on=['SEASON_ID', 'TEAM_ID'], how='left')
+    return df
+
+# %%
+# Apply the functions to create new features
+all_games = calculate_head_to_head(all_games)
+all_games = calculate_recent_performance(all_games)
+all_games = calculate_home_away_splits(all_games)
+all_games = calculate_rest_days(all_games)
+all_games = calculate_franchise_age(all_games, franchise_founding_dates)
+all_games = calculate_cumulative_season_performance(all_games)
+all_games = calculate_previous_season_performance(all_games)
+
+# %%
+# Save the updated dataframe to a new file
+all_games.to_parquet("./data/all_games_with_features.parquet.gzip", index=False)
