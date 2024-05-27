@@ -1,39 +1,12 @@
-# %%
 import os
 import pandas as pd
+import nba_api.stats.endpoints
 from nba_api.stats.static import teams
 from nba_api.stats.endpoints import leaguegamefinder
 import time
 from nba_api.stats.library.parameters import *
 
-nba_teams = teams.get_teams()
-fp_team = "./data/all_games.parquet.gzip"
 
-if not os.path.exists(fp_team):
-    print("data not found")
-    all_games = pd.DataFrame()
-
-    for team in nba_teams:
-        team_id = team.get("id")
-        gamefinder = leaguegamefinder.LeagueGameFinder(
-            team_id_nullable=team_id,
-            league_id_nullable=LeagueIDNullable().nba,
-            season_type_nullable=SeasonType().regular,
-        )
-
-        team_games = gamefinder.get_data_frames()[0]
-        all_games = pd.concat([all_games, team_games])
-    all_games.to_parquet(fp_team, index=False)
-else:
-    print("data found local")
-    all_games = pd.read_parquet(fp_team)
-
-franchise_founding_dates = {team["id"]: team["year_founded"] for team in nba_teams}
-
-all_games["GAME_DATE"] = pd.to_datetime(all_games["GAME_DATE"])
-all_games = all_games.sort_values(["GAME_DATE", "GAME_ID"]).reset_index(drop=True)
-
-# %%
 def calculate_plus_minus(df):
     df["HOME_GAME"] = ~df["MATCHUP"].str.contains("@")
     game_points = df.groupby("GAME_ID")["PTS"].transform("sum")
@@ -145,13 +118,3 @@ def calculate_cumulative_season_performance(df):
     ].transform(lambda x: (x == "L").cumsum())
 
     return df
-
-# %%
-# Apply the function to calculate plus-minus
-all_games = calculate_plus_minus(all_games)
-all_games = calculate_head_to_head(all_games)
-all_games = calculate_recent_performance(all_games, windows=[3, 10])
-all_games = calculate_home_away_splits(all_games)
-all_games = calculate_rest_days(all_games)
-all_games = calculate_franchise_age(all_games, franchise_founding_dates)
-all_games = calculate_cumulative_season_performance(all_games)
