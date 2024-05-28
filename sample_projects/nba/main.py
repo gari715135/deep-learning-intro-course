@@ -12,7 +12,6 @@ from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 import numpy as np
 
-
 nba_teams = teams.get_teams()
 fp_team = "./data/all_games.parquet.gzip"
 
@@ -47,12 +46,8 @@ all_games["DAYS_SINCE_LAST_GAME"] = (
 )
 # all_games.tail(20).to_csv('all_games_lastTwentyRows.csv', index=False)
 curr_game_cols = all_games.columns
-all_games = utils.calculate_head_to_head(all_games)
-all_games = utils.calculate_recent_performance(all_games, windows=[3, 10])
-all_games = utils.calculate_home_away_splits(all_games)
-all_games = utils.calculate_rest_days(all_games)
-all_games = utils.calculate_franchise_age(all_games, franchise_founding_dates)
-all_games = utils.calculate_cumulative_season_performance(all_games)
+all_games = utils.calculate_recent_performance(all_games, windows=[3, 7, 10])
+
 
 # %%
 # Define the features and targets
@@ -85,18 +80,21 @@ home_games = data[data["HOME_GAME"]].set_index("GAME_ID")
 away_games = data[~data["HOME_GAME"]].set_index("GAME_ID")
 
 # Ensure the indices (GAME_ID) are aligned
-home_games = home_games.loc[home_games.index.isin(away_games.index)]
-away_games = away_games.loc[home_games.index]
+home_games = home_games.loc[home_games.index.isin(away_games.index)].fillna(0)
+away_games = away_games.loc[home_games.index].fillna(0)
 
 # Features for home and away teams
 home_features = home_games[feature_cols]
 away_features = away_games[feature_cols]
 
-
-# %%
+display(home_features)
 # Targets for home games
 home_targets = home_games[[target_win, target_plus_minus]].dropna()
+home_targets['PLUS_MINUS'] = home_targets['PLUS_MINUS'].abs()
+home_targets['WL'].value_counts(normalize=True)
+home_features.columns
 
+# %%
 # Split the data into training and testing sets while keeping the index for correspondence
 X_home_train, X_home_test, y_home_train, y_home_test = train_test_split(home_features, home_targets, test_size=0.2, random_state=42)
 X_away_train, X_away_test = away_features.loc[X_home_train.index], away_features.loc[X_home_test.index]
@@ -104,10 +102,10 @@ X_away_train, X_away_test = away_features.loc[X_home_train.index], away_features
 tf.keras.backend.clear_session()
 
 # Normalize the input features
-normalizer_home = Normalization(axis=-1)
+normalizer_home = Normalization()
 normalizer_home.adapt(X_home_train.to_numpy())
 
-normalizer_away = Normalization(axis=-1)
+normalizer_away = Normalization()#axis=-1)
 normalizer_away.adapt(X_away_train.to_numpy())
 
 # Define model inputs
@@ -141,7 +139,6 @@ model.compile(optimizer='adam',
               loss={'home_win': 'binary_crossentropy', 'point_diff': 'mean_squared_error'},
               metrics={'home_win': 'accuracy', 'point_diff': 'mse'})
 
-
 # %%
 # Train the model
 history = model.fit(
@@ -152,3 +149,43 @@ history = model.fit(
     epochs=20,
     batch_size=32
 )
+
+# Save the model
+model.save('home_away_model.keras')
+
+# Evaluate the model
+results = model.evaluate([X_home_test, X_away_test], 
+                         {'home_win': y_home_test[target_win], 'point_diff': y_home_test[target_plus_minus]})
+
+print("Test Loss, Test Accuracy, Test MSE:", results)
+
+
+# %%
+# Plot training history
+def plot_history(history):
+    plt.figure(figsize=(12, 6))
+
+    plt.subplot(1, 2, 1)
+    plt.plot(history.history['home_win_accuracy'], label='Home Win Accuracy')
+    plt.plot(history.history['val_home_win_accuracy'], label='Val Home Win Accuracy')
+    plt.title('Home Win Accuracy')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy')
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(history.history['point_diff_mse'], label='Point Difference rmse')
+    plt.plot(history.history['val_point_diff_mse'], label='Val Point Difference rmse')
+    plt.title('Point Difference Mean Squared Error')
+    plt.xlabel('Epochs')
+    plt.ylabel('rmse')
+    plt.legend()
+
+    plt.show()
+
+plot_history(history)
+
+# %%
+
+
+
