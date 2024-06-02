@@ -256,3 +256,4 @@ fabric.properties
 *.tgz
 logs/
 *sqlite*
+*_logs
